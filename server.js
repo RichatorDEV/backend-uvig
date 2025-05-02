@@ -12,30 +12,45 @@ app.use(cors());
 app.use(express.json());
 
 // Configuración de Multer para subir archivos
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = 'uploads/';
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
+    const ext = path.extname(file.originalname);
+    cb(null, `${Date.now()}-${Math.random().toString(36).substring(2, 15)}${ext}`);
   }
 });
-const upload = multer({ 
+const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
     const allowedTypes = ['image/jpeg', 'image/png', 'video/mp4'];
     if (allowedTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Tipo de archivo no permitido'), false);
+      cb(new Error('Tipo de archivo no permitido. Usa JPEG, PNG o MP4.'), false);
     }
-  }
+  },
+  limits: { fileSize: 50 * 1024 * 1024 } // Límite de 50MB
 });
 
-// Servir archivos estáticos
-app.use('/uploads', express.static('uploads'));
+// Servir archivos estáticos con URL absoluta
+app.use('/uploads', express.static(uploadDir));
+
+// Middleware para manejar errores de Multer
+const handleMulterError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ message: `Error de Multer: ${err.message}` });
+  } else if (err) {
+    return res.status(400).json({ message: err.message });
+  }
+  next();
+};
+app.use(handleMulterError);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -201,8 +216,10 @@ app.post('/api/auth/login', async (req, res) => {
 // Subir foto de perfil
 app.post('/api/users/profile-picture', authenticateToken, upload.single('image'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ message: 'No se proporcionó imagen' });
-    const imageUrl = `/uploads/${req.file.filename}`;
+    if (!req.file) {
+      return res.status(400).json({ message: 'No se proporcionó imagen' });
+    }
+    const imageUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
     await pool.query(
       'INSERT INTO profile_pictures (user_id, image_url) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET image_url = $2',
       [req.user.id, imageUrl]
@@ -371,13 +388,15 @@ app.get('/api/messages', authenticateToken, async (req, res) => {
 app.post('/api/reels', authenticateToken, upload.single('video'), async (req, res) => {
   const { caption, text_overlay, music_url } = req.body;
   try {
-    if (!req.file) return res.status(400).json({ message: 'No se proporcionó video' });
-    const videoUrl = `/uploads/${req.file.filename}`;
+    if (!req.file) {
+      return res.status(400).json({ message: 'No se proporcionó video' });
+    }
+    const videoUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
     const result = await pool.query(
       'INSERT INTO reels (user_id, video_url, caption, text_overlay, music_url) VALUES ($1, $2, $3, $4, $5) RETURNING id',
       [req.user.id, videoUrl, caption, text_overlay, music_url]
     );
-    res.status(201).json({ message: 'Reel creado', reelId: result.rows[0].id });
+    res.status(201).json({ message: 'Reel creado', reelId: result.rows[0].id, videoUrl });
   } catch (error) {
     console.error('Error al crear reel:', error);
     res.status(500).json({ message: 'Error al crear reel' });
